@@ -1,0 +1,179 @@
+--- a/src/llamafactory/train/sft/trainer.py
++++ b/src/llamafactory/train/sft/trainer.py
+@@ -129,8 +129,168 @@
+ 
+     @override
+     def create_optimizer(self, *args, **kwargs) -> "torch.optim.Optimizer":
++        mix_mode = str(getattr(self.finetuning_args, "lora_mix_mode", "default")).lower()
++
++        if mix_mode == "comol" and self.optimizer is None:
++            from transformers.trainer import Trainer
++
++            gate_params = []
++            core_params = []
++            shared_params = []
++            unexpected_params = []
++
++            for name, param in self.model.named_parameters():
++                if not param.requires_grad:
++                    continue
++
++                if (
++                    name.startswith("gate_W_")
++                    or name.startswith("gate_b_")
++                    or name.startswith("gate_residual_A_")
++                    or name.startswith("gate_residual_B_")
++                ):
++                    gate_params.append(param)
++                elif "comol_M_" in name:
++                    core_params.append(param)
++                elif "comol_A_shared_" in name or "comol_B_shared_" in name:
++                    shared_params.append(param)
++                else:
++                    unexpected_params.append((name, param))
++
++            if unexpected_params:
++                names = [name for name, _ in unexpected_params[:20]]
++                raise RuntimeError(
++                    f"[CoMoL] Unexpected trainable parameters: {names}"
++                )
++
++            if not gate_params or not core_params or not shared_params:
++                raise RuntimeError(
++                    "[CoMoL] Incomplete trainable groups: "
++                    f"gate={len(gate_params)}, core={len(core_params)}, "
++                    f"shared={len(shared_params)}"
++                )
++
++            optimizer_grouped_parameters = [
++                {
++                    "params": gate_params,
++                    "lr": float(self.finetuning_args.comol_gate_lr),
++                    "weight_decay": self.args.weight_decay,
++                },
++                {
++                    "params": core_params,
++                    "lr": float(self.finetuning_args.comol_core_lr),
++                    "weight_decay": self.args.weight_decay,
++                },
++                {
++                    "params": shared_params,
++                    "lr": float(self.finetuning_args.comol_shared_lr),
++                    "weight_decay": self.args.weight_decay,
++                },
++            ]
++
++            optimizer_cls, optimizer_kwargs = (
++                Trainer.get_optimizer_cls_and_kwargs(self.args, self.model)
++            )
++            self.optimizer = optimizer_cls(
++                optimizer_grouped_parameters,
++                **optimizer_kwargs,
++            )
++
++            logger.info_rank0(
++                "[CoMoL] Optimizer groups: "
++                f"gate={sum(p.numel() for p in gate_params)}, "
++                f"core={sum(p.numel() for p in core_params)}, "
++                f"shared={sum(p.numel() for p in shared_params)}, "
++                f"total={sum(p.numel() for p in gate_params + core_params + shared_params)}, "
++                f"gate_lr={self.finetuning_args.comol_gate_lr}, "
++                f"core_lr={self.finetuning_args.comol_core_lr}, "
++                f"shared_lr={self.finetuning_args.comol_shared_lr}"
++            )
++            return self.optimizer
++
++        if mix_mode == "asymcore" and self.optimizer is None:
++            from transformers.trainer import Trainer
++
++            gate_params = []
++            asymcore_C_params = []
++            asymcore_R_params = []
++            asymcore_shared_params = []
++            other_params = []
++
++            for name, param in self.model.named_parameters():
++                if not param.requires_grad:
++                    continue
++
++                if (
++                    name.startswith("gate_W_")
++                    or name.startswith("gate_b_")
++                    or name.startswith("gate_residual_A_")
++                    or name.startswith("gate_residual_B_")
++                ):
++                    gate_params.append(param)
++                elif "asymcore_Cshared_" in name or "asymcore_Rshared_" in name:
++                    asymcore_shared_params.append(param)
++                elif "asymcore_C_" in name:
++                    asymcore_C_params.append(param)
++                elif "asymcore_R_" in name:
++                    asymcore_R_params.append(param)
++                else:
++                    other_params.append(param)
++
++            optimizer_grouped_parameters = []
++
++            if gate_params:
++                optimizer_grouped_parameters.append({
++                    "params": gate_params,
++                    "lr": self.args.learning_rate,
++                    "weight_decay": self.args.weight_decay,
++                })
++
++            if asymcore_C_params:
++                optimizer_grouped_parameters.append({
++                    "params": asymcore_C_params,
++                    "lr": getattr(self.finetuning_args, "asymcore_C_lr", self.args.learning_rate),
++                    "weight_decay": self.args.weight_decay,
++                })
++
++            if asymcore_R_params:
++                optimizer_grouped_parameters.append({
++                    "params": asymcore_R_params,
++                    "lr": getattr(self.finetuning_args, "asymcore_R_lr", self.args.learning_rate),
++                    "weight_decay": self.args.weight_decay,
++                })
++
++            if asymcore_shared_params:
++                optimizer_grouped_parameters.append({
++                    "params": asymcore_shared_params,
++                    "lr": getattr(self.finetuning_args, "asymcore_shared_lr", self.args.learning_rate),
++                    "weight_decay": self.args.weight_decay,
++                })
++
++            if other_params:
++                optimizer_grouped_parameters.append({
++                    "params": other_params,
++                    "lr": self.args.learning_rate,
++                    "weight_decay": self.args.weight_decay,
++                })
++
++            if optimizer_grouped_parameters:
++                optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, self.model)
++                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
++
++                logger.info_rank0(
++                    "[AsymCore] Optimizer groups: "
++                    f"gate={sum(p.numel() for p in gate_params)}, "
++                    f"C={sum(p.numel() for p in asymcore_C_params)}, "
++                    f"R={sum(p.numel() for p in asymcore_R_params)}, "
++                    f"shared={sum(p.numel() for p in asymcore_shared_params)}, "
++                    f"other={sum(p.numel() for p in other_params)}"
++                )
++                return self.optimizer
++
+         if self.optimizer is None:
+             self.optimizer = create_custom_optimizer(self.model, self.args, self.finetuning_args)
++
+         return super().create_optimizer(*args, **kwargs)
+ 
+     @override
+@@ -149,6 +309,7 @@
+ 
+     @override
+     def compute_loss(self, model, inputs, *args, **kwargs):
++
+         if self.finetuning_args.use_asft_loss:
+             with torch.no_grad():
+                 ref_outputs = self.ref_model(

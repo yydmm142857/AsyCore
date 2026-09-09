@@ -1,0 +1,13 @@
+AsyCore
+Copyright 2026 Laichunyang Peng and contributors.
+
+This repository contains original AsyCore implementations and integration
+changes for LLaMA-Factory. LLaMA-Factory is distributed under the Apache
+License 2.0. Its upstream repository is:
+https://github.com/hiyouga/LLaMA-Factory
+
+The integration patches in this repository target upstream commit:
+ea31c43d806162a7fd98065abfef2d974fff5766
+
+The experimental resources originate from Llama 2, LoRA-Flow, MGSM, and
+GSM8K. Their use remains subject to their respective licenses and terms.

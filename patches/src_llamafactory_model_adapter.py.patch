@@ -1,0 +1,261 @@
+--- a/src/llamafactory/model/adapter.py
++++ b/src/llamafactory/model/adapter.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ import re
++from types import SimpleNamespace
+ from typing import TYPE_CHECKING
+ 
+ import torch
+@@ -35,6 +36,125 @@
+ logger = logging.get_logger(__name__)
+ 
+ 
++def _asymcore_load_trainable_state(model, state_path: str):
++    import json
++    import torch
++    from pathlib import Path
++
++    path = Path(state_path)
++    if not path.is_file():
++        raise FileNotFoundError(f"[AsymCore] asymcore_state_path not found: {path}")
++
++    obj = torch.load(str(path), map_location="cpu")
++    state = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
++
++    if not isinstance(state, dict):
++        raise ValueError(f"[AsymCore] Invalid asymcore state format: {type(state)}")
++
++    raw_model = model.module if hasattr(model, "module") else model
++    params = dict(raw_model.named_parameters())
++
++    loaded = 0
++    verified = 0
++    skipped = []
++    mismatched = []
++    max_abs_diff = 0.0
++    loaded_names = []
++
++    for name, tensor in state.items():
++        if name not in params:
++            skipped.append(name)
++            continue
++
++        param = params[name]
++        if tuple(param.shape) != tuple(tensor.shape):
++            mismatched.append((name, tuple(tensor.shape), tuple(param.shape)))
++            continue
++
++        src = tensor.to(device=param.device, dtype=param.dtype)
++        param.data.copy_(src)
++        loaded += 1
++        loaded_names.append(name)
++
++        with torch.no_grad():
++            diff = (param.detach() - src).abs().max().item()
++            max_abs_diff = max(max_abs_diff, float(diff))
++            if diff == 0.0:
++                verified += 1
++
++    total = len(state)
++    report = {
++        "state_path": str(path),
++        "format": obj.get("format", "unknown") if isinstance(obj, dict) else "raw",
++        "num_tensors_in_file": total,
++        "loaded": loaded,
++        "verified_exact": verified,
++        "skipped": len(skipped),
++        "mismatched": len(mismatched),
++        "max_abs_diff_after_copy": max_abs_diff,
++        "first_loaded_names": loaded_names[:20],
++        "first_skipped_names": skipped[:20],
++        "first_mismatched": mismatched[:20],
++        "note": "U_ref/V_ref buffers are reconstructed from source LoRA adapters; trainable AsymCore parameters are loaded from this state file.",
++    }
++
++    report_path = path.parent / "asymcore_load_report.json"
++    try:
++        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
++    except Exception as e:
++        logger.warning_rank0(f"[AsymCore] Failed to write load report: {e}")
++
++    logger.info_rank0(
++        f"[AsymCore] loaded trainable inference state: "
++        f"state={path}, loaded={loaded}/{total}, verified_exact={verified}/{total}, "
++        f"skipped={len(skipped)}, mismatched={len(mismatched)}, "
++        f"max_abs_diff={max_abs_diff:.3e}, report={report_path}. "
++        f"U/V buffers are reconstructed from source LoRA adapters; trainable params are overwritten by asymcore_state.pt."
++    )
++
++    if loaded == 0:
++        raise RuntimeError("[AsymCore] No trainable AsymCore tensors were loaded. Check parameter names.")
++
++    if loaded != total or mismatched:
++        logger.warning_rank0(
++            f"[AsymCore] State not fully loaded: loaded={loaded}/{total}, "
++            f"skipped_examples={skipped[:5]}, mismatched_examples={mismatched[:5]}"
++        )
++
++    return model
++
++
++def _asymcore_force_frozen_base_to_bf16(model):
++    import torch
++
++    converted = 0
++    old_bytes = 0
++
++    for name, param in model.named_parameters():
++        if (not param.requires_grad) and param.is_floating_point() and param.dtype == torch.float16:
++            old_bytes += param.numel() * param.element_size()
++            param.data = param.data.to(torch.bfloat16)
++            converted += 1
++
++    logger.info_rank0(
++        f"[AsymCore] Forced frozen fp16 params to bf16: tensors={converted}, "
++        f"approx_old_bytes={old_bytes / 1024**3:.3f}GB"
++    )
++    return model
++
++
++# LoRA-Mix / AsymCore migrated entry.
++try:
++    from lora_mix.main_setup import _setup_cat_lora_tuning
++    from lora_mix.patch_peft import apply_lora_mix_patch
++    _lora_mix_import_error = None
++except Exception as e:
++    _setup_cat_lora_tuning = None
++    apply_lora_mix_patch = None
++    _lora_mix_import_error = e
++
++
++
+ def _setup_full_tuning(
+     model: "PreTrainedModel",
+     finetuning_args: "FinetuningArguments",
+@@ -152,6 +272,124 @@
+         else:
+             logger.info_rank0("Fine-tuning method: {}".format("DoRA" if finetuning_args.use_dora else "LoRA"))
+ 
++    # ===== LoRA-Mix / AsymCore multi-adapter fusion =====
++    mix_mode = str(getattr(finetuning_args, "lora_mix_mode", "default")).lower()
++
++    retired_mix_modes = {"msdflow", "loraaux", "relmix", "sigmix"}
++    if mix_mode in retired_mix_modes:
++        raise ValueError(
++            f"[LoRA-Mix] Method {mix_mode!r} has been retired from this project "
++            "and must not be used for training or evaluation."
++        )
++
++    integrated_mix_modes = {"default", "average_merge", "cat_layer", "loraflow", "loraall", "comol", "asymcore"}
++    if mix_mode not in integrated_mix_modes:
++        raise NotImplementedError(
++            f"[LoRA-Mix] Method {mix_mode!r} is not yet integrated into the "
++            "current Qwen2.5/LLaMA-Factory save-and-reload pipeline. "
++            "Enabled modes: default, average_merge, cat_layer, loraflow, loraall, comol, asymcore."
++        )
++    if isinstance(model_args.adapter_name_or_path, str):
++        model_args.adapter_name_or_path = [
++            x.strip() for x in model_args.adapter_name_or_path.split(",") if x.strip()
++        ]
++
++    if (
++        mix_mode != "default"
++        and model_args.adapter_name_or_path is not None
++        and len(model_args.adapter_name_or_path) > 1
++    ):
++        if _setup_cat_lora_tuning is None or apply_lora_mix_patch is None:
++            raise RuntimeError(
++                "[LoRA-Mix] lora_mix modules are not importable. "
++                "Please check lora_mix/, lora_mix_forward/, lora_mix_save/. "
++                f"Original import error: {repr(_lora_mix_import_error)}"
++            )
++
++        logger.info_rank0(
++            f"[LoRA-Mix] Detected mix_mode={mix_mode}, "
++            f"loading {len(model_args.adapter_name_or_path)} adapters via PeftMixedModel."
++        )
++
++        # Patch PEFT Linear.forward before AsymCore initialization.
++        apply_lora_mix_patch()
++
++        # New LLaMA-Factory no longer passes training_args into init_adapter.
++        # The proxy provides train/predict mode and a writable audit directory.
++        import os
++
++        comol_state_for_proxy = getattr(
++            finetuning_args,
++            "comol_state_path",
++            None,
++        )
++        proxy_output_dir = (
++            os.path.dirname(str(comol_state_for_proxy))
++            if comol_state_for_proxy
++            else ""
++        )
++
++        training_proxy = SimpleNamespace(
++            do_train=bool(is_trainable),
++            output_dir=proxy_output_dir,
++        )
++
++        model = _setup_cat_lora_tuning(
++            config=config,
++            model=model,
++            model_args=model_args,
++            finetuning_args=finetuning_args,
++            training_args=training_proxy,
++            is_trainable=is_trainable,
++            # Keep old run_sft.py behavior for multi-LoRA fusion:
++            # do not upcast trainable fusion params to fp32.
++            cast_trainable_params_to_fp32=False,
++        )
++        import os
++        if os.environ.get("ASYCORE_FORCE_BASE_BF16", "0") == "1":
++            model = _asymcore_force_frozen_base_to_bf16(model)
++
++        if mix_mode == "asymcore":
++            state_path = getattr(
++                finetuning_args,
++                "asymcore_state_path",
++                None,
++            )
++            if state_path:
++                logger.info_rank0(
++                    "[AsymCore] Predict/load mode detected, "
++                    f"loading trainable state: {state_path}"
++                )
++                model = _asymcore_load_trainable_state(
++                    model,
++                    state_path,
++                )
++            elif not is_trainable:
++                raise RuntimeError(
++                    "[AsymCore] Prediction mode requires "
++                    "asymcore_state_path, otherwise the model only "
++                    "uses freshly initialized AsymCore parameters."
++                )
++
++        elif mix_mode == "comol":
++            state_path = getattr(
++                finetuning_args,
++                "comol_state_path",
++                None,
++            )
++            if not is_trainable and not state_path:
++                raise RuntimeError(
++                    "[CoMoL] Prediction mode requires "
++                    "comol_state_path."
++                )
++            if not is_trainable:
++                logger.info_rank0(
++                    "[CoMoL] Prediction state was loaded and "
++                    f"verified during mixture initialization: {state_path}"
++                )
++
++        return model
++
+     adapter_to_resume = None
+ 
+     if model_args.adapter_name_or_path is not None:

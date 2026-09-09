@@ -1,0 +1,40 @@
+model_name_or_path: /path/to/Llama-2-7b-hf
+adapter_name_or_path: /path/to/language_lora, /path/to/math_lora
+trust_remote_code: true
+
+lora_mix_mode: asymcore
+asymcore_route_granularity: module
+asymcore_factor_variant: right_shared
+asymcore_gate_mode: raw
+asymcore_train_shared: true
+asymcore_C_lr: 0.0005
+asymcore_R_lr: 0.0005
+asymcore_shared_lr: 0.0005
+asymcore_state_path: /path/to/asymcore_state.pt
+
+stage: sft
+do_train: false
+do_predict: true
+predict_with_generate: true
+finetuning_type: lora
+lora_target: all
+
+eval_dataset: zh_math_test_250
+template: llama2
+cutoff_len: 512
+max_samples: 250
+overwrite_cache: false
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+
+output_dir: outputs/asycore_predict
+overwrite_output_dir: false
+per_device_eval_batch_size: 1
+bf16: true
+fp16: false
+pure_bf16: false
+do_sample: false
+max_new_tokens: 512
+temperature: 1.0
+top_p: 1.0
+report_to: none

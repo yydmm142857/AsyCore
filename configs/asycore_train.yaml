@@ -1,0 +1,46 @@
+model_name_or_path: /path/to/Llama-2-7b-hf
+adapter_name_or_path: /path/to/language_lora, /path/to/math_lora
+trust_remote_code: true
+
+lora_mix_mode: asymcore
+asymcore_route_granularity: module
+asymcore_factor_variant: right_shared
+asymcore_gate_mode: raw
+asymcore_train_shared: true
+asymcore_C_lr: 0.0005
+asymcore_R_lr: 0.0005
+asymcore_shared_lr: 0.0005
+
+stage: sft
+do_train: true
+do_eval: false
+finetuning_type: lora
+lora_target: all
+disable_gradient_checkpointing: false
+
+dataset: zh_math_train_1k
+template: llama2
+cutoff_len: 512
+max_samples: 1000
+overwrite_cache: false
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+
+output_dir: outputs/asycore_train
+logging_steps: 1
+save_strategy: "no"
+plot_loss: true
+overwrite_output_dir: false
+report_to: none
+
+seed: 43
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 8
+learning_rate: 0.005
+num_train_epochs: 5
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+fp16: false
+pure_bf16: false
+ddp_timeout: 180000000

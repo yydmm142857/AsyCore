@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the AsyCore paper."
+title: "AsyCore: Dynamic and Parameter-Efficient LoRA Expert Fusion via Asymmetric Core Factorization"
+type: software
+authors:
+  - family-names: Peng
+    given-names: Laichunyang
+  - family-names: Zhang
+    given-names: Yuxuan
+  - family-names: Lei
+    given-names: Yulin
+  - family-names: Zhou
+    given-names: Jinglin
+  - family-names: Ye
+    given-names: Fei
+version: 0.1.0
+date-released: 2026-09-09
+license: Apache-2.0
+repository-code: "https://github.com/yydmm142857/AsyCore"

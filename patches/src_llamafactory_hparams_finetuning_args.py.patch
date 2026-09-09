@@ -1,0 +1,106 @@
+--- a/src/llamafactory/hparams/finetuning_args.py
++++ b/src/llamafactory/hparams/finetuning_args.py
+@@ -13,7 +13,7 @@
+ # limitations under the License.
+ 
+ from dataclasses import asdict, dataclass, field
+-from typing import Any, Literal
++from typing import Optional, Any, Literal
+ 
+ 
+ @dataclass
+@@ -453,6 +453,94 @@
+ ):
+     r"""Arguments pertaining to which techniques we are going to fine-tuning with."""
+ 
++    # ===== LoRA-Mix / AsymCore arguments =====
++    lora_mix_mode: str = field(
++        default="default",
++        metadata={"help": "LoRA-Mix mode: default / asymcore."},
++    )
++    asymcore_route_granularity: str = field(
++        default="module",
++        metadata={"help": "Routing granularity for AsymCore: module / layer."},
++    )
++    asymcore_factor_variant: str = field(
++        default="right_shared",
++        metadata={"help": "Factor variant for AsymCore: right_shared / left_shared / both_diff."},
++    )
++    asymcore_gate_mode: str = field(
++        default="raw",
++        metadata={"help": "Gate input mode for AsymCore: raw / vproj / rproj."},
++    )
++    asymcore_layer_gate_residual_rank: int = field(
++        default=0,
++        metadata={
++            "help": (
++                "Rank of the linear residual branch B(Ax) for layer-level AsyCore gates. "
++                "Zero preserves the original layer gate; 15 approximately matches the module-gate parameter budget."
++            )
++        },
++    )
++    asymcore_train_shared: bool = field(
++        default=False,
++        metadata={"help": "Whether to train the shared side in AsymCore."},
++    )
++    asymcore_C_lr: float = field(
++        default=5e-4,
++        metadata={"help": "Learning rate for AsymCore expert-specific C parameters."},
++    )
++    asymcore_R_lr: float = field(
++        default=5e-4,
++        metadata={"help": "Learning rate for AsymCore expert-specific R parameters."},
++    )
++    asymcore_shared_lr: float = field(
++        default=1e-4,
++        metadata={"help": "Learning rate for AsymCore shared-side parameters."},
++    )
++    asymcore_state_path: Optional[str] = field(
++        default=None,
++        metadata={"help": "Path to trainable-only AsymCore state file for prediction or resumed loading."},
++    )
++
++
++    # ===== Formal CoMoL arguments =====
++    comol_freeze_shared_ab: bool = field(
++        default=False,
++        metadata={"help": "Freeze CoMoL high-dimensional shared A/B matrices."},
++    )
++    comol_gate_mode: str = field(
++        default="vproj",
++        metadata={"help": "Gate input for CoMoL: vproj / raw."},
++    )
++    comol_ref_adapter_idx: int = field(
++        default=0,
++        metadata={"help": "Reference adapter index used for CoMoL initialization."},
++    )
++    comol_gate_lr: float = field(
++        default=5e-3,
++        metadata={"help": "Learning rate for CoMoL routing gates."},
++    )
++    comol_core_lr: float = field(
++        default=5e-4,
++        metadata={"help": "Learning rate for CoMoL expert core matrices."},
++    )
++    comol_shared_lr: float = field(
++        default=1e-4,
++        metadata={"help": "Learning rate for CoMoL shared high-dimensional matrices."},
++    )
++    lora_mix_state_path: Optional[str] = field(
++        default=None,
++        metadata={
++            "help": (
++                "Explicit trainable-only state path for "
++                "cat_layer, loraflow, or loraall prediction."
++            )
++        },
++    )
++
++    comol_state_path: Optional[str] = field(
++        default=None,
++        metadata={"help": "Explicit comol_state.pt path used during prediction."},
++    )
++
+     pure_bf16: bool = field(
+         default=False,
+         metadata={"help": "Whether or not to train model in purely bf16 precision (without AMP)."},

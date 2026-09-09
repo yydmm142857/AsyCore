@@ -1,0 +1,55 @@
+# Models, adapters, checkpoints, and generated artifacts
+models/
+weights/
+checkpoints/
+outputs/
+results/
+reports/
+logs/
+wandb/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Generated datasets and local dataset directories
+dataset/
+datasets/
+*.jsonl
+generated_predictions.json
+generated_predictions.jsonl
+predict_results.json
+trainer_state.json
+
+# Credentials and local configuration
+.env
+.env.*
+*.key
+*.pem
+*token*
+*secret*
+
+# Python/editor artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+.DS_Store
+
+# Local scratch files
+tmp/
+tmp_configs/
+*.log
+*.bak*
+
+# Reproduction data distributed with this repository
+!data/
+!data/README.md
+!data/dataset_info.json
+!data/SHA256SUMS
+!data/zh_math_train_1k.json
+!data/ru_math_train_1k.json

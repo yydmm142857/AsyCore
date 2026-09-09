@@ -1,0 +1,197 @@
+--- a/src/llamafactory/train/sft/workflow.py
++++ b/src/llamafactory/train/sft/workflow.py
+@@ -116,10 +116,192 @@
+         **metric_module,
+     )
+ 
++    # Capture the initial trainable AsymCore state so that every run can
++    # verify that backward + optimizer steps changed the fusion parameters.
++    asymcore_update_before = {}
++    mix_mode_for_update_audit = str(
++        getattr(finetuning_args, "lora_mix_mode", "default")
++    ).lower()
++
++    if training_args.do_train and mix_mode_for_update_audit == "asymcore":
++        asymcore_trainable_keys = (
++            "gate_W_",
++            "gate_b_",
++            "gate_residual_A_",
++            "gate_residual_B_",
++            "asymcore_C_",
++            "asymcore_R_",
++            "asymcore_Cshared_",
++            "asymcore_Rshared_",
++        )
++        for name, param in model.named_parameters():
++            if param.requires_grad and any(
++                key in name for key in asymcore_trainable_keys
++            ):
++                asymcore_update_before[name] = (
++                    param.detach().float().cpu().clone()
++                )
++
++        if not asymcore_update_before:
++            raise RuntimeError(
++                "[AsymCore] No trainable fusion parameters were found "
++                "before training."
++            )
++
++        logger.info_rank0(
++            f"[AsymCore] Update audit captured "
++            f"{len(asymcore_update_before)} trainable tensors."
++        )
++
+     # Training
+     if training_args.do_train:
+-        train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+-        trainer.save_model()
++        train_result = trainer.train(
++            resume_from_checkpoint=training_args.resume_from_checkpoint
++        )
++
++        if mix_mode_for_update_audit == "asymcore":
++            import json
++            from pathlib import Path
++
++            current_parameters = dict(model.named_parameters())
++            tensor_reports = []
++            changed_tensors = 0
++            total_numel = 0
++            changed_numel = 0
++            global_max_abs_update = 0.0
++
++            for name, before in asymcore_update_before.items():
++                if name not in current_parameters:
++                    raise RuntimeError(
++                        f"[AsymCore] Trainable parameter disappeared: {name}"
++                    )
++
++                after = (
++                    current_parameters[name]
++                    .detach()
++                    .float()
++                    .cpu()
++                )
++
++                if tuple(before.shape) != tuple(after.shape):
++                    raise RuntimeError(
++                        f"[AsymCore] Shape changed for {name}: "
++                        f"{tuple(before.shape)} -> {tuple(after.shape)}"
++                    )
++
++                diff = (after - before).abs()
++
++                if not bool(diff.isfinite().all()):
++                    raise RuntimeError(
++                        f"[AsymCore] Non-finite update detected: {name}"
++                    )
++
++                max_abs = float(diff.max().item()) if diff.numel() else 0.0
++                mean_abs = float(diff.mean().item()) if diff.numel() else 0.0
++                changed = max_abs > 0.0
++                numel = int(diff.numel())
++
++                total_numel += numel
++                if changed:
++                    changed_tensors += 1
++                    changed_numel += int((diff > 0).sum().item())
++
++                global_max_abs_update = max(
++                    global_max_abs_update,
++                    max_abs,
++                )
++
++                tensor_reports.append(
++                    {
++                        "name": name,
++                        "shape": list(diff.shape),
++                        "numel": numel,
++                        "changed": changed,
++                        "max_abs_update": max_abs,
++                        "mean_abs_update": mean_abs,
++                    }
++                )
++
++            tensor_reports.sort(
++                key=lambda item: item["max_abs_update"],
++                reverse=True,
++            )
++
++            update_report = {
++                "status": (
++                    "PARAMETERS_UPDATED"
++                    if changed_tensors > 0
++                    else "NO_PARAMETER_UPDATE"
++                ),
++                "captured_tensors": len(asymcore_update_before),
++                "changed_tensors": changed_tensors,
++                "unchanged_tensors": (
++                    len(asymcore_update_before) - changed_tensors
++                ),
++                "total_numel": total_numel,
++                "changed_numel": changed_numel,
++                "global_max_abs_update": global_max_abs_update,
++                "top_updates": tensor_reports[:30],
++                "all_tensors": tensor_reports,
++            }
++
++            update_path = (
++                Path(training_args.output_dir)
++                / "asymcore_update_report.json"
++            )
++            update_path.parent.mkdir(parents=True, exist_ok=True)
++            update_path.write_text(
++                json.dumps(
++                    update_report,
++                    indent=2,
++                    ensure_ascii=False,
++                ),
++                encoding="utf-8",
++            )
++
++            logger.info_rank0(
++                f"[AsymCore] ASYMCORE_UPDATE_AUDIT: "
++                f"changed={changed_tensors}/"
++                f"{len(asymcore_update_before)}, "
++                f"max_abs_update={global_max_abs_update:.6e}, "
++                f"report={update_path}"
++            )
++
++            if changed_tensors == 0:
++                raise RuntimeError(
++                    "[AsymCore] Training completed but no fusion parameter "
++                    "changed."
++                )
++
++        # For AsymCore / LoRA-Mix, do not call trainer.save_model().
++        # In PEFT mixed-model mode, Trainer may treat the wrapped model as a plain nn.Module
++        # and try to serialize the full model state_dict, which is huge and unnecessary.
++        mix_mode = str(getattr(finetuning_args, "lora_mix_mode", "default")).lower()
++        if mix_mode == "asymcore":
++            from lora_mix_save import __all__ as save_modes
++
++            save_func = save_modes.get("asymcore")
++            if save_func is not None:
++                save_func(model, trainer)
++                logger.info_rank0("[AsymCore] Saved asymcore_state.pt")
++            else:
++                logger.warning_rank0("[AsymCore] No save function found for asymcore.")
++        elif mix_mode in {"cat_layer", "loraflow", "loraall"}:
++            from lora_mix_save.generic_mix_state import (
++                save_generic_mix_state,
++            )
++            save_generic_mix_state(
++                model=model,
++                trainer=trainer,
++                mix_mode=mix_mode,
++            )
++        else:
++            trainer.save_model()
++
++        if str(getattr(finetuning_args, "lora_mix_mode", "default")).lower() == "comol":
++            from lora_mix_save.comol_weight import save_comol_params
++            save_comol_params(model, trainer)
++
+         if finetuning_args.include_effective_tokens_per_second:
+             train_result.metrics["effective_tokens_per_sec"] = calculate_tps(
+                 dataset_module["train_dataset"], train_result.metrics, stage="sft"

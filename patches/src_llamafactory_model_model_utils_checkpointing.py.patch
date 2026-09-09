@@ -1,0 +1,20 @@
+--- a/src/llamafactory/model/model_utils/checkpointing.py
++++ b/src/llamafactory/model/model_utils/checkpointing.py
+@@ -95,6 +95,17 @@
+                     arg.requires_grad_(True)
+                     break  # assume the first tensor is always the hidden states
+ 
++        # AsyCore/LoRA-Mix may keep trainable parameters outside the decoder layer module
++        # while the decoder layer forward still depends on them through patched LoRA modules.
++        # In that case, the original "only checkpoint trainable layers" test wrongly skips
++        # checkpointing and keeps full activations, causing OOM at batch4/cutoff512.
++        if os.environ.get("ASYCORE_FORCE_CHECKPOINT_ALL", "0") == "1":
++            for arg in args:
++                if torch.is_tensor(arg) and torch.is_floating_point(arg):
++                    arg.requires_grad_(True)
++                    break
++            return gradient_checkpointing_func(func, *args, **kwargs)
++
+         if has_grad:
+             return gradient_checkpointing_func(func, *args, **kwargs)
+         else:
